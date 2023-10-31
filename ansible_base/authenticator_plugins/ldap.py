@@ -311,9 +311,9 @@ class AuthenticatorPlugin(LDAPBackend, AbstractAuthenticatorPlugin):
                             f"Got unexpected LDAP exception when forcing LDAP disconnect for user {user_from_ldap.username}, login will still proceed"
                         )
 
-            self.process_login_messages(user_from_ldap, username)
+                self.process_login_messages(user_from_ldap, username)
 
-            return update_user_claims(user_from_ldap, self.database_instance, users_groups)
+                return update_user_claims(user_from_ldap, self.database_instance, users_groups)
         except Exception:
             logger.exception(f"Encountered an error authenticating to LDAP {self.database_instance.name}")
             return None
