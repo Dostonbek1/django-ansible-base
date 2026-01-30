@@ -53,28 +53,13 @@ class JWTAlgorithmListFieldValidator:
             )
 
 
-class InsecurePyJWKClient(PyJWKClient):
-    """
-    A PyJWKClient that optionally disables SSL verification.
-    Used for development environments with self-signed certificates.
-    """
-
-    def __init__(self, uri: str, verify_ssl: bool = True, **kwargs):
-        super().__init__(uri, **kwargs)
-        self._verify_ssl = verify_ssl
-
-    def _fetch_jwk_set(self):
-        """Override to allow insecure connections when verify_ssl is False."""
-        import urllib.request
-        import ssl
-
-        if not self._verify_ssl:
-            context = ssl.create_default_context()
-            context.check_hostname = False
-            context.verify_mode = ssl.CERT_NONE
-            with urllib.request.urlopen(self.uri, context=context, timeout=self.timeout) as response:
-                return response.read().decode("utf-8")
-        return super()._fetch_jwk_set()
+def _create_insecure_ssl_context():
+    """Create an SSL context that doesn't verify certificates."""
+    import ssl
+    context = ssl.create_default_context()
+    context.check_hostname = False
+    context.verify_mode = ssl.CERT_NONE
+    return context
 
 
 class ExternalOAuthConsumerConfiguration(BaseAuthenticatorConfiguration):
@@ -149,7 +134,7 @@ class ExternalOAuthConsumerConfiguration(BaseAuthenticatorConfiguration):
             "List of acceptable audience values (aud claim). "
             "Leave empty to skip audience validation."
         ),
-        default=list,
+        default=[],
         required=False,
         allow_null=True,
         ui_field_label=_('Expected Audiences'),
@@ -327,19 +312,13 @@ class AuthenticatorPlugin(AbstractAuthenticatorPlugin):
         cache_key = f"{jwks_uri}:{verify_ssl}"
 
         if cache_key not in self._jwk_clients:
-            if verify_ssl:
-                self._jwk_clients[cache_key] = PyJWKClient(
-                    jwks_uri,
-                    cache_jwk_set=True,
-                    lifespan=cache_timeout,
-                )
-            else:
-                self._jwk_clients[cache_key] = InsecurePyJWKClient(
-                    jwks_uri,
-                    verify_ssl=False,
-                    cache_jwk_set=True,
-                    lifespan=cache_timeout,
-                )
+            ssl_context = None if verify_ssl else _create_insecure_ssl_context()
+            self._jwk_clients[cache_key] = PyJWKClient(
+                jwks_uri,
+                cache_jwk_set=True,
+                lifespan=cache_timeout,
+                ssl_context=ssl_context,
+            )
 
         return self._jwk_clients[cache_key]
 
@@ -347,10 +326,8 @@ class AuthenticatorPlugin(AbstractAuthenticatorPlugin):
         """Refresh JWKS and retry getting signing key."""
         try:
             # Create new client without cache
-            if verify_ssl:
-                jwks_client = PyJWKClient(jwks_uri, cache_jwk_set=False)
-            else:
-                jwks_client = InsecurePyJWKClient(jwks_uri, verify_ssl=False, cache_jwk_set=False)
+            ssl_context = None if verify_ssl else _create_insecure_ssl_context()
+            jwks_client = PyJWKClient(jwks_uri, cache_jwk_set=False, ssl_context=ssl_context)
 
             return jwks_client.get_signing_key_from_jwt(token)
         except Exception as e:

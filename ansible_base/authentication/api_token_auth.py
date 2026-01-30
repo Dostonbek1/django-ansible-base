@@ -59,13 +59,12 @@ class ExternalOAuthTokenAuthentication(BaseAuthentication):
 
         # Import here to avoid circular imports
         from ansible_base.authentication.models import Authenticator
-        from ansible_base.authentication.authenticator_plugins.utils import get_authenticator_plugin
+        from ansible_base.authentication.authenticator_plugins.utils import get_authenticator_class
 
         # Query all enabled external OAuth authenticators in priority order
         authenticators = Authenticator.objects.filter(
             enabled=True,
             category='api_auth',
-            type='external_oauth_consumer',
         ).order_by('order')
 
         if not authenticators.exists():
@@ -74,7 +73,7 @@ class ExternalOAuthTokenAuthentication(BaseAuthentication):
 
         for auth in authenticators:
             try:
-                plugin_class = get_authenticator_plugin(auth.type)
+                plugin_class = get_authenticator_class(auth.type)
                 plugin = plugin_class(database_instance=auth)
                 plugin.set_logger(logger)
 

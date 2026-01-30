@@ -81,7 +81,7 @@ curl -X POST https://gateway/api/gateway/v1/authenticators/ \
   -d '{
     "name": "Entra ID Production",
     "enabled": true,
-    "type": "external_oauth_consumer",
+    "type": "ansible_base.authentication.authenticator_plugins.external_oauth_consumer",
     "configuration": {
       "ISSUER_URL": "https://login.microsoftonline.com/<tenant-id>/v2.0",
       "JWKS_URI": "https://login.microsoftonline.com/<tenant-id>/discovery/v2.0/keys",
