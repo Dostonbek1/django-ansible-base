@@ -27,15 +27,7 @@ from django.contrib.auth import get_user_model
 from django.core.cache import cache
 from django.utils.encoding import smart_str
 from jwt import PyJWKClient
-from jwt.exceptions import (
-    DecodeError,
-    ExpiredSignatureError,
-    InvalidAudienceError,
-    InvalidIssuerError,
-    InvalidSignatureError,
-    InvalidTokenError,
-    MissingRequiredClaimError,
-)
+from jwt.exceptions import DecodeError, ExpiredSignatureError, InvalidAudienceError, InvalidIssuerError, InvalidSignatureError, InvalidTokenError, MissingRequiredClaimError
 from rest_framework.authentication import BaseAuthentication
 from rest_framework.exceptions import AuthenticationFailed
 
