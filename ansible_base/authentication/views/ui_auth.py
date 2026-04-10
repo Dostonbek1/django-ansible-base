@@ -83,6 +83,8 @@ def generate_ui_auth_data():
                 response["show_login_form"] = True
             except ImportError:
                 logger.error(f"There is an enabled authenticator id {authenticator.id} whose plugin is not working {authenticator.type}")
+        elif authenticator.category == 'api_auth':
+            continue
         else:
             logger.error(f"Don't know how to handle authenticator of type {authenticator.type}")
 
