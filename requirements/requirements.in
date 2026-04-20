@@ -8,4 +8,4 @@ djangorestframework<3.16 # problem with OAuth2Application.organization null hand
 django-crum
 inflection
 sqlparse>=0.5.2 # https://github.com/ansible/django-ansible-base/security/dependabot/9
-dynaconf>=3.2.10,<4.0.0  # Dynaconf 4.0.0 is expected to be a major release with breaking changes
+dynaconf>=3.2.13,<4.0.0  # CVE-2026-33154 / Dynaconf 4.0.0 is expected to be a major release with breaking changes

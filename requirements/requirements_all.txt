@@ -52,7 +52,7 @@ djangorestframework==3.15.2
     #   drf-spectacular
 drf-spectacular==0.29.0
     # via -r requirements/requirements_api_documentation.in
-dynaconf==3.2.12
+dynaconf==3.2.13
     # via -r requirements/requirements.in
 idna==3.11
     # via requests
