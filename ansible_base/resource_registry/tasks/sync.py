@@ -8,7 +8,6 @@ from collections import defaultdict
 from dataclasses import dataclass, field
 from enum import Enum
 from io import StringIO, TextIOBase
-from urllib.parse import parse_qs, urlparse
 
 from asgiref.sync import sync_to_async
 from django.conf import settings
@@ -137,55 +136,41 @@ class RemoteAssignmentFetcher:
 
         Returns True if all pages were fetched successfully, False on any error.
         """
-        next_url = None
+        page = 1
         try:
             while True:
-                resp = self._fetch_page(list_fn, next_url)
-                if resp is None or resp.status_code != 200:
-                    logger.warning(f"Failed to fetch {assignment_type} assignments batch {next_url}: HTTP {resp.status_code if resp else 'No Response'}")
+                filters = {'page': page, 'page_size': self.page_size}
+                if self.service_filter:
+                    filters['content_type__service'] = self.service_filter
+                resp = list_fn(filters=filters)
+                if resp.status_code != 200:
+                    logger.warning(f"Failed to fetch {assignment_type} assignments page {page}: HTTP {resp.status_code}")
                     return False
-                data = resp.json()
-                self._process_assignments(data.get('results') or [], actor_id_key, assignment_type)
 
-                next_url = data.get('next')
-                if not next_url:
+                data = resp.json()
+                for assignment in data.get('results') or []:
+                    role_name = assignment['role_definition']
+                    if role_name not in self.local_role_names:
+                        logger.debug(f"Skipping remote {assignment_type} assignment with unknown local role: {role_name}")
+                        continue
+                    ansible_id_or_pk = assignment.get('object_ansible_id') or assignment.get('object_id')
+                    self.assignments.add(
+                        AssignmentTuple(
+                            actor_ansible_id=assignment[actor_id_key],
+                            ansible_id_or_pk=ansible_id_or_pk,
+                            role_definition_name=role_name,
+                            assignment_type=assignment_type,
+                        )
+                    )
+
+                if not data.get('next'):
                     return True
-                logger.debug(f"Fetching next batch {next_url} of {assignment_type} assignments")
+
+                page += 1
+                logger.debug(f"Fetching next page {page} of {assignment_type} assignments")
         except Exception:
             logger.exception(f"Failed to fetch remote {assignment_type} assignments")
             return False
-
-    def _build_filters(self, **extra):
-        filters = {'page_size': self.page_size}
-        if self.service_filter:
-            filters['content_type__service'] = self.service_filter
-        filters.update(extra)
-        return filters
-
-    def _fetch_page(self, list_fn, next_url):
-        if next_url is None:
-            return list_fn(filters=self._build_filters())
-        cursor = parse_qs(urlparse(next_url).query).get('cursor', [None])[0]
-        if cursor is None:
-            logger.warning(f"Pagination URL missing cursor parameter: {next_url}")
-            return None
-        return list_fn(filters=self._build_filters(cursor=cursor))
-
-    def _process_assignments(self, assignments_data, actor_id_key, assignment_type):
-        for assignment in assignments_data:
-            role_name = assignment['role_definition']
-            if role_name not in self.local_role_names:
-                logger.debug(f"Skipping remote {assignment_type} assignment with unknown local role: {role_name}")
-                continue
-            ansible_id_or_pk = assignment.get('object_ansible_id') or assignment.get('object_id')
-            self.assignments.add(
-                AssignmentTuple(
-                    actor_ansible_id=assignment[actor_id_key],
-                    ansible_id_or_pk=ansible_id_or_pk,
-                    role_definition_name=role_name,
-                    assignment_type=assignment_type,
-                )
-            )
 
 
 def get_remote_assignments(api_client: ResourceAPIClient, page_size: int | None = None, service_filter: str | None = None) -> RemoteAssignmentResult:
@@ -558,9 +543,10 @@ class SyncExecutor:
             resource_type,
             manifest_list,
         )
-        self.deleted_count = resources_to_cleanup.count()
-        if self.deleted_count:
-            self.write(f"Deleting {self.deleted_count} orphaned resources")
+        orphan_count = resources_to_cleanup.count()
+        deleted_before = len(self.results["deleted"])
+        if orphan_count:
+            self.write(f"Deleting {orphan_count} orphaned resources")
             for orphan in resources_to_cleanup:
                 try:
                     _sc = orphan.content_type.resource_type.serializer_class
@@ -568,10 +554,11 @@ class SyncExecutor:
                     data.update(orphan.summary_fields())
                     with transaction.atomic():
                         delete_resource(orphan)
-                except ResourceDeletionError as exc:
-                    self.write(f"Error deleting orphaned resources {str(exc)}")
+                except Exception as exc:
+                    self.write(f"Error deleting orphaned resource {orphan.ansible_id}: {type(exc).__name__}: {exc}")
                 else:  # persist in the report
                     self.results["deleted"].append(data)
+        self.deleted_count = len(self.results["deleted"]) - deleted_before  # actual successes for this resource type
 
     def _handle_retries(self):  # pragma: no cover
         """Check if there are unavailable resources to re-try."""

@@ -3,7 +3,7 @@ from unittest import mock
 from uuid import uuid4
 
 import pytest
-from django.db.utils import Error
+from django.db.utils import Error, IntegrityError
 from django.test import override_settings
 
 from ansible_base.lib.testing.util import StaticResourceAPIClient
@@ -25,6 +25,7 @@ from ansible_base.resource_registry.tasks.sync import (
     create_api_client,
     get_remote_assignments,
 )
+from test_app.models import User
 
 
 @pytest.fixture(scope="function")
@@ -456,7 +457,7 @@ def test_get_remote_assignments_incomplete_on_failure(failure_mode):
     page1 = _mock_response(
         body={
             "results": [{"user_ansible_id": "u1", "object_ansible_id": "o1", "role_definition": "Team Member"}],
-            "next": "http://example.com/?cursor=abc123",
+            "next": "http://example.com/page2",
         }
     )
 
@@ -552,7 +553,7 @@ def test_get_remote_assignments_filters_unknown_roles(static_api_client):
 
 @pytest.mark.django_db
 def test_remote_assignment_fetcher_passes_page_size():
-    """First page should be fetched with no filters (cursor pagination)."""
+    """page_size should be included in the pagination filters."""
     api_client = mock.Mock(spec=["list_user_assignments", "list_team_assignments"])
     ok = _mock_response()
     api_client.list_user_assignments.return_value = ok
@@ -560,8 +561,39 @@ def test_remote_assignment_fetcher_passes_page_size():
 
     RemoteAssignmentFetcher(api_client, page_size=100).fetch()
 
-    api_client.list_user_assignments.assert_called_with(filters={'page_size': 100})
-    api_client.list_team_assignments.assert_called_with(filters={'page_size': 100})
+    api_client.list_user_assignments.assert_called_with(filters={'page': 1, 'page_size': 100})
+    api_client.list_team_assignments.assert_called_with(filters={'page': 1, 'page_size': 100})
+
+
+@pytest.mark.django_db
+def test_remote_assignment_fetcher_passes_service_filter_in_pagination():
+    """service_filter should be included as content_type__service in pagination filters."""
+    api_client = mock.Mock(spec=["list_user_assignments", "list_team_assignments"])
+    ok = _mock_response()
+    api_client.list_user_assignments.return_value = ok
+    api_client.list_team_assignments.return_value = ok
+
+    RemoteAssignmentFetcher(api_client, page_size=100, service_filter='controller').fetch()
+
+    expected_filters = {'page': 1, 'page_size': 100, 'content_type__service': 'controller'}
+    api_client.list_user_assignments.assert_called_with(filters=expected_filters)
+    api_client.list_team_assignments.assert_called_with(filters=expected_filters)
+
+
+@pytest.mark.django_db
+def test_remote_assignment_fetcher_omits_service_filter_when_none():
+    """When service_filter is None, content_type__service should not be in filters."""
+    api_client = mock.Mock(spec=["list_user_assignments", "list_team_assignments"])
+    ok = _mock_response()
+    api_client.list_user_assignments.return_value = ok
+    api_client.list_team_assignments.return_value = ok
+
+    RemoteAssignmentFetcher(api_client, page_size=100, service_filter=None).fetch()
+
+    api_client.list_user_assignments.assert_called_with(filters={'page': 1, 'page_size': 100})
+    assert 'content_type__service' not in api_client.list_user_assignments.call_args.kwargs.get(
+        'filters', api_client.list_user_assignments.call_args[1].get('filters', {})
+    )
 
 
 @pytest.mark.django_db
@@ -577,8 +609,7 @@ def test_remote_assignment_fetcher_reads_page_size_from_settings():
         assert fetcher.page_size == 200
         fetcher.fetch()
 
-    api_client.list_user_assignments.assert_called_with(filters={'page_size': 200})
-    api_client.list_team_assignments.assert_called_with(filters={'page_size': 200})
+    api_client.list_user_assignments.assert_called_with(filters={'page': 1, 'page_size': 200})
 
 
 @mock.patch('ansible_base.resource_registry.tasks.sync.get_remote_assignments')
@@ -602,20 +633,6 @@ def test_sync_executor_passes_service_filter(mock_local, mock_remote, static_api
     executor._sync_assignments()
     mock_remote.assert_called_once_with(static_api_client, page_size=None, service_filter='controller')
     mock_local.assert_called_once_with(service='controller')
-
-
-def test_fetch_page_preserves_service_filter_on_cursor_pages():
-    """_fetch_page must include content_type__service on cursor-based pagination pages."""
-    api_client = mock.Mock(spec=["list_user_assignments", "list_team_assignments"])
-    fetcher = RemoteAssignmentFetcher(api_client, page_size=100, service_filter='controller')
-
-    mock_list_fn = mock.Mock()
-    mock_list_fn.return_value = mock.Mock(status_code=200)
-    mock_list_fn.return_value.json.return_value = {'results': [], 'next': None}
-
-    fetcher._fetch_page(mock_list_fn, 'http://example.com/api/?cursor=abc123&page_size=100')
-    call_filters = mock_list_fn.call_args.kwargs['filters']
-    assert call_filters.get('content_type__service') == 'controller', "Service filter must be preserved on cursor pages"
 
 
 @mock.patch("ansible_base.resource_registry.tasks.sync.get_resource_server_client")
@@ -652,11 +669,11 @@ def test_create_api_client_default_jwt_expiration(mock_get_client):
 
 
 @pytest.mark.django_db
-def test_remote_assignment_fetcher_sends_cursor_on_subsequent_pages():
-    """Subsequent pages should extract the cursor from the next URL."""
+def test_remote_assignment_fetcher_sends_page_size_on_all_pages():
+    """page_size should be included in filters on every page, not just the first."""
     api_client = mock.Mock(spec=["list_user_assignments", "list_team_assignments"])
 
-    page1 = _mock_response(body={"results": [], "next": "http://example.com/api/assignments/?cursor=abc123"})
+    page1 = _mock_response(body={"results": [], "next": "http://example.com/page2"})
     page2 = _mock_response(body={"results": [], "next": None})
     api_client.list_user_assignments.side_effect = [page1, page2]
     api_client.list_team_assignments.return_value = _mock_response()
@@ -665,8 +682,8 @@ def test_remote_assignment_fetcher_sends_cursor_on_subsequent_pages():
 
     user_calls = api_client.list_user_assignments.call_args_list
     assert len(user_calls) == 2
-    assert user_calls[0] == mock.call(filters={'page_size': 100})
-    assert user_calls[1] == mock.call(filters={'cursor': 'abc123', 'page_size': 100})
+    assert user_calls[0] == mock.call(filters={'page': 1, 'page_size': 100})
+    assert user_calls[1] == mock.call(filters={'page': 2, 'page_size': 100})
 
 
 @pytest.mark.django_db
@@ -688,6 +705,55 @@ def test_get_remote_assignments_handles_null_results():
 
     # Should complete successfully without TypeError
     assert result.is_complete is True
+    assert len(result.assignments) == 0
+
+
+@pytest.mark.django_db
+def test_remote_assignment_fetcher_multi_page_with_assignments():
+    """Multi-page pagination collects assignments across pages and increments page number."""
+    from ansible_base.rbac.models import RoleDefinition
+
+    RoleDefinition.objects.create(name='MultiPageRole', managed=True)
+
+    api_client = mock.Mock(spec=["list_user_assignments", "list_team_assignments"])
+    page1 = _mock_response(
+        body={
+            'results': [
+                {'user_ansible_id': 'u1', 'object_ansible_id': 'obj1', 'role_definition': 'MultiPageRole'},
+            ],
+            'next': 'http://example.com/page2',
+        }
+    )
+    page2 = _mock_response(
+        body={
+            'results': [
+                {'user_ansible_id': 'u2', 'object_ansible_id': 'obj2', 'role_definition': 'MultiPageRole'},
+            ],
+            'next': None,
+        }
+    )
+    api_client.list_user_assignments.side_effect = [page1, page2]
+    api_client.list_team_assignments.return_value = _mock_response()
+
+    result = RemoteAssignmentFetcher(api_client, page_size=1).fetch()
+
+    assert result.is_complete is True
+    assert len(result.assignments) == 2
+    user_calls = api_client.list_user_assignments.call_args_list
+    assert len(user_calls) == 2
+    assert user_calls[0] == mock.call(filters={'page': 1, 'page_size': 1})
+    assert user_calls[1] == mock.call(filters={'page': 2, 'page_size': 1})
+
+
+@pytest.mark.django_db
+def test_remote_assignment_fetcher_http_error_returns_incomplete():
+    """Non-200 status code marks result as incomplete with warning."""
+    api_client = mock.Mock(spec=["list_user_assignments", "list_team_assignments"])
+    api_client.list_user_assignments.return_value = _mock_response(status_code=500)
+
+    result = RemoteAssignmentFetcher(api_client).fetch()
+
+    assert result.is_complete is False
     assert len(result.assignments) == 0
 
 
@@ -800,7 +866,6 @@ def test_attempt_update_resource_error_exception(static_api_client, resource_to_
 def test_delete_resource_exception_handling():
     """Test that delete_resource logs exceptions with logger.exception."""
     from ansible_base.resource_registry.tasks.sync import ResourceDeletionError, delete_resource
-    from test_app.models import User
 
     # Create a user (which will auto-create a Resource via signals)
     user = User.objects.create(username='testuser', email='test@example.com')
@@ -960,7 +1025,6 @@ def test_get_local_assignments_skips_users_without_resources():
     """Test get_local_assignments skips user assignments when user has no Resource."""
     from ansible_base.rbac.models import RoleDefinition
     from ansible_base.resource_registry.tasks.sync import get_local_assignments
-    from test_app.models import User
 
     # Create a user with resource
     user = User.objects.create(username='testuser', email='test@example.com')
@@ -1120,7 +1184,6 @@ def test_get_ansible_id_or_pk_for_non_org_team():
 
     # Create role and assignment
     role_def = RoleDefinition.objects.create(name='Inventory Admin', content_type=inv_dab_ct, managed=True)
-    from test_app.models import User
 
     user = User.objects.create(username='testuser', email='test@example.com')
     assignment = role_def.give_permission(user, inventory)
@@ -1212,7 +1275,6 @@ def test_create_local_assignment_global():
     """Test create_local_assignment creates global assignment."""
     from ansible_base.rbac.models import RoleDefinition, RoleUserAssignment
     from ansible_base.resource_registry.tasks.sync import AssignmentTuple, create_local_assignment
-    from test_app.models import User
 
     # Create user with resource
     user = User.objects.create(username='testuser', email='test@example.com')
@@ -1312,7 +1374,6 @@ def test_delete_local_assignment_global():
     """Test delete_local_assignment removes global assignment"""
     from ansible_base.rbac.models import RoleDefinition
     from ansible_base.resource_registry.tasks.sync import AssignmentTuple, delete_local_assignment
-    from test_app.models import User
 
     # Create user with resource
     user = User.objects.create(username='testuser', email='test@example.com')
@@ -1338,3 +1399,29 @@ def test_delete_local_assignment_global():
     from ansible_base.rbac.models import RoleUserAssignment
 
     assert not RoleUserAssignment.objects.filter(user=user, role_definition=role_def, object_id__isnull=True).exists()
+
+
+@pytest.mark.django_db
+def test_cleanup_orphans_continues_after_deletion_error(admin_api_client, static_api_client, stdout):
+    """Test that _cleanup_orphans skips a failing orphan, logs it and continues deleting the rest."""
+    url = get_relative_url("resource-list")
+    for username in ("orphan_one", "orphan_two"):
+        response = admin_api_client.post(
+            url,
+            {
+                "service_id": "57592fbc-7ecb-405f-9f5f-ebad20932d38",
+                "resource_type": "shared.user",
+                "resource_data": {"username": username, "last_name": "Test", "email": f"{username}@example.com"},
+            },
+            format="json",
+        )
+        assert response.status_code == 201
+
+    with mock.patch("ansible_base.resource_registry.tasks.sync.delete_resource", side_effect=IntegrityError("FK constraint")):
+        executor = SyncExecutor(api_client=static_api_client, stdout=stdout)
+        executor.run()
+
+    error_lines = [line for line in stdout.lines if "IntegrityError" in line]
+    assert len(error_lines) == 2
+    assert User.objects.filter(username__in=["orphan_one", "orphan_two"]).count() == 2
+    assert executor.deleted_count == 0

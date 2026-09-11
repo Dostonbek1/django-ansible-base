@@ -147,6 +147,23 @@ def test_list_resources(resource_client, organization):
 
 
 @pytest.mark.django_db
+def test_bulk_update_resources(resource_client, organization):
+    """Test bulk_update_resources client method."""
+    resource = Resource.get_resource_for_object(organization)
+    ansible_id = str(resource.ansible_id)
+    new_service_id = str(uuid.uuid4())
+    items = [{"ansible_id": ansible_id, "new_service_id": new_service_id}]
+
+    resp = resource_client.bulk_update_resources(items)
+    assert resp.status_code == 200
+    assert resp.json()["updated"] == 1
+    assert resp.json()["errors"] == []
+
+    resource.refresh_from_db()
+    assert str(resource.service_id) == new_service_id
+
+
+@pytest.mark.django_db
 def test_get_resource_type(resource_client):
     resp = resource_client.get_resource_type("shared.organization")
 
@@ -194,7 +211,7 @@ def _assert_assignment_matches_data(assignment, data, obj, actor):
     assert 'created' in data, data
     # assert DateTimeField().to_representation(assignment.created) == data['created']  # TODO
     assert str(assignment.created_by.resource.ansible_id) == data['created_by_ansible_id']
-    assert assignment.object_id == obj.id
+    assert assignment.object_id == str(obj.id)
     assert str(assignment.object_id) == str(data['object_id'])
     if hasattr(obj, 'resource'):
         assert str(obj.resource.ansible_id) == data['object_ansible_id']
@@ -309,7 +326,7 @@ def test_list_user_assignments(resource_client, org_admin_rd, user, organization
 
     assert resp.status_code == 200
     data = resp.json()
-    assert len(data["results"]) >= 1
+    assert data["count"] >= 1
 
     # Find our assignment in the results
     assignment_found = False
@@ -333,7 +350,7 @@ def test_list_team_assignments(resource_client, inv_rd, team, inventory):
 
     assert resp.status_code == 200
     data = resp.json()
-    assert len(data["results"]) >= 1
+    assert data["count"] >= 1
 
     # Find our assignment in the results
     assignment_found = False
