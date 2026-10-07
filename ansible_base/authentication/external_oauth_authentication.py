@@ -40,6 +40,8 @@ from rest_framework.authentication import BaseAuthentication
 from rest_framework.exceptions import AuthenticationFailed
 
 from ansible_base.authentication.models import Authenticator, AuthenticatorUser
+from ansible_base.authentication.utils.authentication import get_or_create_authenticator_user
+from ansible_base.authentication.utils.claims import update_user_claims
 from ansible_base.lib.logging import log_auth_event
 from ansible_base.lib.utils.settings import get_setting
 
@@ -366,7 +368,7 @@ class ExternalOAuthAuthentication(BaseAuthentication):
                 logger.error(f"JWT signature verification failed with fresh keys for provider {provider.name}")
                 raise AuthenticationFailed("Invalid token signature")
 
-        # Step 7: Map claims to user (placeholder - will be implemented in P4)
+        # Step 7: Map claims to user and reconcile via JIT + authenticator maps (P3/P4)
         user = self._map_token_to_user(validated_payload, provider)
 
         # Log successful authentication
@@ -442,60 +444,89 @@ class ExternalOAuthAuthentication(BaseAuthentication):
 
     def _map_token_to_user(self, token_payload: dict, provider: Authenticator) -> User:
         """
-        Map JWT claims to AAP user.
+        Map JWT claims to AAP user via JIT (get-or-create + authenticator maps).
 
-        This is a placeholder implementation for the PoC.
-        Full implementation will be in P4 (Claim Mapping).
+        Resolution order per SDP P4 (human tokens often carry azp/client_id too):
+          1. If CLIENT_ID_CLAIM present AND an AuthenticatorUser already exists → use it (SP shortcut).
+          2. Else if USERNAME_CLAIM present → use as uid (human path; JIT create/attach).
+          3. Else if CLIENT_ID_CLAIM present → use as uid (app-only / client-credentials; JIT create/attach).
+          4. Else → reject.
 
-        Args:
-            token_payload: Validated JWT payload
-            provider: External OAuth provider
-
-        Returns:
-            User: AAP user
-
-        Raises:
-            AuthenticationFailed: If user cannot be mapped
+        After resolving the user, run update_user_claims for authenticator map reconciliation.
         """
         config = provider.configuration
-
-        # Try service principal mapping first (CLIENT_ID_CLAIM)
         client_id_claim = config.get('CLIENT_ID_CLAIM', 'azp')
-        client_id = token_payload.get(client_id_claim)
-
-        if client_id:
-            # Service principal - look up by AuthenticatorUser.uid
-            try:
-                auth_user = AuthenticatorUser.objects.select_related('user').get(
-                    provider=provider,
-                    uid=client_id
-                )
-                logger.debug(f"Mapped service principal {client_id} to user {auth_user.user.username}")
-                return auth_user.user
-            except AuthenticatorUser.DoesNotExist:
-                logger.warning(f"Service principal {client_id} not found for provider {provider.name}")
-
-        # Try user mapping (USERNAME_CLAIM)
         username_claim = config.get('USERNAME_CLAIM', 'email')
+        groups_claim = config.get('GROUPS_CLAIM', 'groups')
+
+        client_id = token_payload.get(client_id_claim)
         username_value = token_payload.get(username_claim)
 
-        if username_value:
-            # User token - look up by AuthenticatorUser.uid
+        uid = None
+
+        # 1. Prefer existing SP link (avoids JIT-creating from azp on human tokens)
+        if client_id:
             try:
                 auth_user = AuthenticatorUser.objects.select_related('user').get(
                     provider=provider,
-                    uid=username_value
+                    uid=client_id,
                 )
-                logger.debug(f"Mapped user claim {username_claim}={username_value} to user {auth_user.user.username}")
-                return auth_user.user
+                logger.debug(f"Matched existing service principal link for provider {provider.name}")
+                return self._reconcile_and_return(auth_user.user, provider, token_payload, groups_claim)
             except AuthenticatorUser.DoesNotExist:
-                logger.warning(
-                    f"User with {username_claim}={username_value} not found for provider {provider.name}"
-                )
+                pass
 
-        # Authentication failed - no user mapping found
-        logger.error(f"Failed to map JWT claims to user for provider {provider.name}")
-        raise AuthenticationFailed("Authentication failed")
+        # 2. USERNAME_CLAIM present → human identity
+        if username_value:
+            uid = username_value
+        # 3. CLIENT_ID_CLAIM present but no username → app-only token
+        elif client_id:
+            uid = client_id
+
+        if not uid:
+            logger.warning(f"No identity claim resolved for provider {provider.name}")
+            raise AuthenticationFailed("Authentication failed")
+
+        email = token_payload.get('email', '')
+        user_details = {
+            'first_name': token_payload.get('given_name', ''),
+            'last_name': token_payload.get('family_name', ''),
+            'email': email,
+        }
+
+        try:
+            user, auth_user, created = get_or_create_authenticator_user(
+                uid=uid,
+                email=email,
+                authenticator=provider,
+                user_details=user_details,
+                extra_data=token_payload,
+            )
+        except Exception:
+            logger.exception(f"Failed to resolve user for provider {provider.name}")
+            raise AuthenticationFailed("Authentication failed")
+
+        if not user:
+            logger.warning(f"User resolution returned None for provider {provider.name}")
+            raise AuthenticationFailed("Authentication failed")
+
+        if created:
+            logger.info(f"JIT-created AuthenticatorUser for uid on provider {provider.name}")
+
+        return self._reconcile_and_return(user, provider, token_payload, groups_claim)
+
+    def _reconcile_and_return(self, user, provider: Authenticator, token_payload: dict, groups_claim: str) -> User:
+        """Run authenticator map reconciliation and return the user."""
+        groups = token_payload.get(groups_claim) or []
+        if isinstance(groups, str):
+            groups = [groups]
+
+        result = update_user_claims(user, provider, groups, attrs=token_payload)
+        if result is None:
+            logger.warning(f"User denied access by authenticator maps for provider {provider.name}")
+            raise AuthenticationFailed("Authentication failed")
+
+        return result
 
     def authenticate_header(self, request):
         """
