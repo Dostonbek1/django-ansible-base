@@ -241,6 +241,7 @@ class SAMLConfiguration(BaseAuthenticatorConfiguration):
 class AuthenticatorPlugin(SocialAuthMixin, SocialAuthValidateCallbackMixin, SAMLAuth, AbstractAuthenticatorPlugin):
     configuration_class = SAMLConfiguration
     type = "SAML"
+    display_name = _("SAML")
     logger = logger
     category = "sso"
     configuration_encrypted_fields = ['SP_PRIVATE_KEY']

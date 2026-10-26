@@ -99,6 +99,7 @@ class GoogleOAuth2Configuration(BaseAuthenticatorConfiguration):
 class AuthenticatorPlugin(SocialAuthMixin, SocialAuthValidateCallbackMixin, GoogleOAuth2, AbstractAuthenticatorPlugin):
     configuration_class = GoogleOAuth2Configuration
     type = "google_oauth2"
+    display_name = _("Google OAuth")
     logger = logger
     category = "sso"
     configuration_encrypted_fields = ['SECRET']
